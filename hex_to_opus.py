@@ -19,8 +19,11 @@ import argparse
 import struct
 import sys
 import math
+import base64
+from pylibsrtp import Policy,Session
 from collections import namedtuple
 
+__all__ = ['ogg_opus_coder','srtp_ogg_opus_coder','ogg_page_coder']
 __author__ = "Kamanashis Roy"
 __copyright__ = "Copyright (C) 2019 Kamanashis Roy"
 __license__ = "GNU Public License version 3"
@@ -36,10 +39,18 @@ class ogg_page_coder:
     TODO support bigger packet than 255 bytes
     TODO get the page_seq from the rtp-header
     '''
-    def __init__(self, verbose=False):
+    def __init__(self, verbose=False, simulate=True):
         self.strm_fd = None
         self.reset()
         self.verbose = verbose
+        self.simulate = simulate
+        self.curr_bitstream = 0
+
+    def get_curr_bitstream(self):
+        return self.curr_bitstream
+
+    def set_curr_bitstream(self, bitstream):
+        self.curr_bitstream = bitstream
 
     def __bool__(self):
         return self.strm_fd is not None;
@@ -48,7 +59,6 @@ class ogg_page_coder:
         if self.strm_fd:
             self.strm_fd.close()
         self.page_seq = 0
-        self.bitstream_serial = 1111 # We only support 1 bitstream(mono)
         self.strm_fd = strm_fd
 
     def _make_page_header(self, content_len, ptime, is_data, is_first, is_last, crc):
@@ -89,7 +99,7 @@ class ogg_page_coder:
         num_segments = content_len >> 8
         if content_len & 0xFF:
             num_segments += 1
-        header = OGG_PAGE_HEADER('OggS', 0, header_type_flag, granule_position, self.bitstream_serial, self.page_seq, crc, num_segments)
+        header = OGG_PAGE_HEADER(b'OggS', 0, header_type_flag, granule_position, self.curr_bitstream, self.page_seq, crc, num_segments)
 
         if self.verbose:
             print("dumping ogg page", header, content_len)
@@ -106,7 +116,7 @@ class ogg_page_coder:
         if num_segments > 0:
             page_head.append(struct.pack('<B', content_len%255))
             
-        page_head = ''.join(page_head)
+        page_head = b''.join(page_head)
 
         assert len(page_head) == (27+num_segments) # header_size = number_page_segments + 27 [Byte]
 
@@ -149,14 +159,17 @@ class ogg_page_coder:
 
 
         for x in content:
-            crc = (crc<<8)^crc_lookup[((crc>>24)&0xFF)^ord(x)]
+            crc = (crc<<8)^crc_lookup[((crc>>24)&0xFF)^x]
         return crc & 0xffffffff
 
 
-    def write_page(self, content, ptime=20, is_data=False, is_first=False, is_last=False):
+    def write_page(self, content, ptime=20, is_data=False, is_first=False, is_last=False, pageno=0):
         '''
 
         '''
+        if not self.simulate:
+            self.page_seq = pageno
+
         # get head while crc=0
         head = self._make_page_header(content_len=len(content), ptime=ptime,is_data=is_data,is_first=is_first,is_last=is_last,crc=0)
 
@@ -189,7 +202,10 @@ class ogg_page_coder:
         else:
             return None
 
-    def next(self):
+    def next(self): # support for python2
+        return __next__
+
+    def __next__(self):
         '''
         Read the page from file
         '''
@@ -214,7 +230,7 @@ class ogg_page_coder:
         content_len = 0
         content = None
         for x in page_segments:
-            content_len += ord(x)
+            content_len += x
 
         print("read content_len %d" % content_len)
         if content_len:
@@ -224,30 +240,46 @@ class ogg_page_coder:
 OPUS_IDENTITY_HEADER = namedtuple("OPUS_IDENTITY_HEADER","PATTERN,VERSION,NUM_CHANNELS,PRE_SKIP,SAMPLING_RATE,GAIN,FAMILY")
 OPUS_IDENTITY_HEADER_FMT = '<8sBBHIhB'
 
-OPUS_COMMENT_HEADER = namedtuple("OPUS_COMMENT_HEADER","PATTERN,VENDOR_STR_CNT,VENDOR,NUM_COMMENTS")
-OPUS_COMMENT_HEADER_FMT = '<8sI3sI'
-
 RTP_HEADER = namedtuple('RTP_HEADER', 'FIRST,PAYLOAD_TYPE,SEQUENCE_NUMBER,TIMESTAMP,SSRC')
-RTP_HEADER_FMT = '<BBHII'
+RTP_HEADER_FMT = '>BBHII'
 
 class ogg_opus_coder:
     '''
     https://tools.ietf.org/html/rfc7845
     '''
-    def __init__(self, rtp_header_len=12, udp_header_len=0, pre_skip=11971,sampling_rate=48000,gain=0,has_timestamp=False,verbose=False):
-        self.rtp_header_len = rtp_header_len
-        self.udp_header_len = udp_header_len
+    def __init__(self, pre_skip=11971,sampling_rate=48000,gain=0,verbose=False):
         self.pre_skip = pre_skip
         self.sampling_rate = sampling_rate
         self.gain = gain
-        self.has_timestamp = has_timestamp # unused
         self.verbose = verbose
         self.ogg = ogg_page_coder(verbose)
 
     def reset(self):
         self.ogg.reset()
 
-    def write_stream_header(self):
+    def write_stream_comment(self, vendor, comment = []):
+        if self.ogg is None:
+            print("No output file")
+            return
+
+        comment_content = []
+
+        # OpusTags
+        comment_content.append(struct.pack('<8s',b'OpusTags'))
+
+        # add vendor name
+        comment_content.append(struct.pack('<I',len(vendor)))
+        comment_content.append(vendor.encode("utf-8"))
+
+        # add other comments
+        comment_content.append(struct.pack('<I',len(comment)))
+        for x in comment:
+            comment_content.append(struct.pack('<I',len(x)))
+            comment_content.append(x.encode("utf-8"))
+
+        self.ogg.write_page(b''.join(comment_content), ptime=0)
+
+    def write_stream_header(self, bitstream_serial):
         '''
           0                   1                   2                   3
           0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -272,74 +304,23 @@ class ogg_opus_coder:
             print("No output file")
             return
         
+        self.ogg.set_curr_bitstream(bitstream_serial)
         # Identification header
-        header = OPUS_IDENTITY_HEADER('OpusHead', 1, 1, self.pre_skip, self.sampling_rate, self.gain, 0) # version 1, channel 1, pre-skip, freq 48kHz, gain 8, mono = 0
-        self.ogg.write_page(struct.pack(OPUS_IDENTITY_HEADER_FMT, *header), is_first=True, ptime=0) 
+        header = OPUS_IDENTITY_HEADER(b'OpusHead', 1, 1, self.pre_skip, self.sampling_rate, self.gain, 0) # version 1, channel 1, pre-skip, freq 48kHz, gain 8, mono = 0
+        content = struct.pack(OPUS_IDENTITY_HEADER_FMT, *header)
+        self.ogg.write_page(content, is_first=True, ptime=0) 
 
         # When the 'channel mapping family' octet has this value, the channel mapping table MUST be omitted from the ID header packet.
         #self.ogg.write(struct.pack('<BBB',1,1,1)) # number of stream = 1, coupled streams = 1, channel mapping = 1
 
-        # comment header
-        comment = OPUS_COMMENT_HEADER('OpusTags', 3, 'Mav', 0)
-        self.ogg.write_page(struct.pack(OPUS_COMMENT_HEADER_FMT, *comment), ptime=0) # vendor Mav, No comments
-
-    def dump_packet(self, packet,is_last=False):
-        if self.ogg is None:
-            print("No output file")
-            return
-        if not packet:
-            print("No packet")
-            return
-
-        if self.verbose:
-            print("Dumping packet ", packet)
-
-        # decode RTP
-        rtp_raw_header = []
-        for i in range(self.udp_header_len,self.rtp_header_len+self.udp_header_len):
-            x = packet[i]
-            xint = int(x,16)
-            rtp_raw_header.append(chr(xint))
-
-        rtp_raw_header = ''.join(rtp_raw_header)
-        if self.verbose:
-            print(RTP_HEADER._make(struct.unpack(RTP_HEADER_FMT, rtp_raw_header)))
-        # TODO use the timestamp from the RTP header
-
-        content = []
-        # dump block
-        for i in range(self.rtp_header_len+self.udp_header_len,len(packet)):
-            x = packet[i]
-            xint = int(x,16)
-            content.append(struct.pack('B',xint))
-
-        self.ogg.write_page(''.join(content), is_data=True,is_last=is_last, ptime=20) # By default the ptime=20
-
-    def record_rtp(self, infile, outfile):
+    def start_file(self, outfile):
         '''
-        Convert an RTP hexdump into a recorded file
+        Write ogg file
         '''
         self.ogg.reset(open(outfile, 'wb'))
-        self.write_stream_header()
-        with open(infile, 'r') as rtp_fd:
-            packet_counter = 0
-            packet = []
-            for xline in rtp_fd:
-                if ' ' not in xline or not xline:
-                    if packet:
-                        packet_counter += 1
-                        self.dump_packet(packet)
-                        packet = []
-                else:
-                    content = xline.split()
-                    #print(len(content))
-                    content.pop(0) # skip the segment column
-                    packet.extend(content)
 
-            if packet:
-                self.dump_packet(packet,is_last=True)
-        self.ogg.close()
-        print("Written ", packet_counter, " packets")
+    def end_file(self):
+        self.ogg.reset()
 
     def explain_file(self, infile):
         '''
@@ -357,10 +338,10 @@ class ogg_opus_coder:
             #    opus_comment_head = OPUS_COMMENT_HEADER._make(struct.unpack(OPUS_COMMENT_HEADER_FMT, content))
             #    print(opus_comment_head)
             else:
-                print(' '.join([hex(ord(x)) for x in content]))
+                print(' '.join([hex(x) for x in content]))
                 if page_counter > 1:
                     # show the TOC byte
-                    toc = ord(content[0])
+                    toc = content[0]
                     config = (toc >> 3)
                     s = toc & 0b100
                     s = s >> 2
@@ -371,6 +352,119 @@ class ogg_opus_coder:
 
         print("Read %d pages" % page_counter)
 
+class srtp_ogg_opus_coder(ogg_opus_coder):
+    '''
+    Allow record srtp/rtp stream
+    '''
+    def __init__(self,rtp_header_len=12, udp_header_len=0,srtpkey=None,verbose=False):
+        #super(ogg_opus_coder, self).__init__(verbose=verbose)
+        ogg_opus_coder.__init__(self,verbose=verbose)
+  
+        # setup rtp parameters
+        self.rtp_header_len = rtp_header_len
+        self.udp_header_len = udp_header_len
+
+        # setup srtp parameters
+        self.srtpkey = srtpkey
+        self.srtp_session = None
+        self.ssrc = None
+
+
+    def record_rtp_packet(self, packet,is_last=False):
+        if self.ogg is None:
+            print("No output file")
+            return
+        if not packet:
+            print("No packet")
+            return
+
+        if self.verbose:
+            print("Dumping packet ", packet)
+
+
+        rtp_raw_full = None
+        try:
+            rtp_raw_full = bytes.fromhex(''.join(packet[self.udp_header_len:]))
+        except:
+            print("Failed to get hex", packet)
+            return
+
+        if self.verbose:
+            print(self.udp_header_len, packet[self.udp_header_len-1])
+            print(self.rtp_header_len, packet[self.udp_header_len])
+            print(self.rtp_header_len, packet[self.udp_header_len+1])
+
+        # decode RTP Header
+        rtp_raw_header = rtp_raw_full[:12]
+
+        if self.verbose:
+            print(rtp_raw_header.hex())
+        rtp = RTP_HEADER._make(struct.unpack(RTP_HEADER_FMT, rtp_raw_header))
+        if self.verbose:
+            print(rtp)
+
+        # Filter the RTP
+        if (rtp.FIRST & 0b10000000) != 0b10000000:
+            print("Not an RTP")
+            return
+
+        # rtp_exten = rtp.FIRST & 0b1
+        # Filter opus
+        if rtp.PAYLOAD_TYPE != 111:
+            print("Unknown payload ", rtp.PAYLOAD_TYPE)
+            return
+
+        if self.srtpkey:
+            if self.ssrc != rtp.SSRC:
+                print("using key [%s]" % self.srtpkey)
+                #plc = Policy(key=self.srtpkey.encode("utf-8"),ssrc_type=Policy.SSRC_ANY_INBOUND)
+                srtpkey = base64.b64decode(self.srtpkey)
+                plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_INBOUND)
+                #plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_INBOUND, SSRC_SPECIFIC=1)
+                #plc = Policy(key=srtpkey,ssrc_type=Policy.SSRC_ANY_INBOUND)
+                print(plc)
+                self.srtp_session = Session(policy=plc)
+                self.ssrc = rtp.SSRC
+            try:
+                rtp_raw_full = self.srtp_session.unprotect(rtp_raw_full)
+            except:
+                print("decrypt fail", rtp.SEQUENCE_NUMBER)
+                return
+
+
+        # Add bitstream header
+        if self.ogg.get_curr_bitstream() != rtp.SSRC:
+            self.write_stream_header(rtp.SSRC)
+            self.write_stream_comment('hex_to_opus', [str(rtp)])
+
+        rtp_payload = rtp_raw_full[self.rtp_header_len:]
+        self.ogg.write_page(rtp_payload, is_data=True,is_last=is_last, ptime=20, pageno=rtp.SEQUENCE_NUMBER) # By default the ptime=20
+
+
+    def record_rtp_file(self, infile, outfile):
+        '''
+        Convert an RTP hexdump into a recorded file
+        '''
+        self.start_file(outfile)
+        with open(infile, 'r') as rtp_fd:
+            packet_counter = 0
+            packet = []
+            for xline in rtp_fd:
+                if ' ' not in xline or not xline:
+                    if packet:
+                        packet_counter += 1
+                        self.record_rtp_packet(packet)
+                        packet = []
+                else:
+                    content = xline.split()
+                    #print(len(content))
+                    content.pop(0) # skip the segment column
+                    packet.extend(content)
+
+            if packet:
+                self.record_rtp_packet(packet,is_last=True)
+        self.end_file()
+        print("Written ", packet_counter, " packets")
 
 if __name__ == "__main__":
 
@@ -402,13 +496,19 @@ if __name__ == "__main__":
         , help='Length of udp header, should be 8 for IPV4')
                    
 
+    # Support decryption
+    parser.add_argument('--srtpkey'
+        , required=False
+        , default=None
+        , help='srtpkey to decrypt the rtp')
+                   
     args = parser.parse_args()
     if args.v:
         print(args)
     if args.hexfile and args.outfile:
-        opusfile = ogg_opus_coder(rtp_header_len=args.rtplen,udp_header_len=args.udplen, has_timestamp=args.timestamp,verbose=args.v)
-        opusfile.record_rtp(args.hexfile, args.outfile)
+        opusfile = srtp_ogg_opus_coder(rtp_header_len=args.rtplen,udp_header_len=args.udplen,verbose=args.v,srtpkey=args.srtpkey)
+        opusfile.record_rtp_file(args.hexfile, args.outfile)
     if args.explainfile:
-        opusfile = ogg_opus_coder(has_timestamp=args.timestamp,verbose=args.v)
+        opusfile = ogg_opus_coder(verbose=args.v)
         opusfile.explain_file(args.explainfile)
 
