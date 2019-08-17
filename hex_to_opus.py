@@ -356,38 +356,43 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
     '''
     Allow record srtp/rtp stream
     '''
-    def __init__(self,rtp_header_len=12, udp_header_len=0,srtpkey=None,verbose=False):
+    def __init__(self,rtp_header_len=12, udp_header_len=0,srtpkey=None,verbose=False,payload_type=111,filter_ssrc=None):
         #super(ogg_opus_coder, self).__init__(verbose=verbose)
         ogg_opus_coder.__init__(self,verbose=verbose)
   
         # setup rtp parameters
         self.rtp_header_len = rtp_header_len
         self.udp_header_len = udp_header_len
+        self.payload_type = payload_type
 
         # setup srtp parameters
         self.srtpkey = srtpkey
         self.srtp_session = None
         self.ssrc = None
+        self.filter_ssrc = filter_ssrc
 
 
     def record_rtp_packet(self, packet,is_last=False):
-        if self.ogg is None:
-            print("No output file")
-            return
+        assert self.ogg is not None
+        
         if not packet:
             print("No packet")
-            return
+            return False
 
         if self.verbose:
             print("Dumping packet ", packet)
-
 
         rtp_raw_full = None
         try:
             rtp_raw_full = bytes.fromhex(''.join(packet[self.udp_header_len:]))
         except:
             print("Failed to get hex", packet)
-            return
+            return False
+
+        if len(rtp_raw_full) < self.rtp_header_len:
+            print("udp payload is too small")
+            return False
+
 
         if self.verbose:
             print(self.udp_header_len, packet[self.udp_header_len-1])
@@ -403,16 +408,20 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         if self.verbose:
             print(rtp)
 
-        # Filter the RTP
-        if (rtp.FIRST & 0b10000000) != 0b10000000:
+        # Filter the RTP with v=2
+        if (rtp.FIRST & 0b11000000) != 0b10000000:
             print("Not an RTP")
-            return
+            return False
 
         # rtp_exten = rtp.FIRST & 0b1
         # Filter opus
-        if rtp.PAYLOAD_TYPE != 111:
-            print("Unknown payload ", rtp.PAYLOAD_TYPE)
-            return
+        if self.payload_type and rtp.PAYLOAD_TYPE != self.payload_type:
+            print("Skipping payload {rtp_payload_type} while {opus_payload_type} expected.".format(rtp_payload_type=rtp.PAYLOAD_TYPE, opus_payload_type=self.payload_type))
+            return False
+
+        if self.filter_ssrc and self.filter_ssrc != rtp.SSRC:
+            print("Skipping ssrc={rtp_ssrc} while {filter_ssrc} expected".format(rtp_ssrc=rtp.SSRC,filter_ssrc=self.filter_ssrc))
+            return False
 
         if self.srtpkey:
             if self.ssrc != rtp.SSRC:
@@ -428,8 +437,8 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
             try:
                 rtp_raw_full = self.srtp_session.unprotect(rtp_raw_full)
             except:
-                print("decrypt fail", rtp.SEQUENCE_NUMBER)
-                return
+                print("decrypt fail seq={sequence}, ssrc={ssrc}".format(sequence=rtp.SEQUENCE_NUMBER,ssrc=rtp.SSRC))
+                return False
 
 
         # Add bitstream header
@@ -439,6 +448,7 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 
         rtp_payload = rtp_raw_full[self.rtp_header_len:]
         self.ogg.write_page(rtp_payload, is_data=True,is_last=is_last, ptime=20, pageno=rtp.SEQUENCE_NUMBER) # By default the ptime=20
+        return True
 
 
     def record_rtp_file(self, infile, outfile):
@@ -448,12 +458,14 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         self.start_file(outfile)
         with open(infile, 'r') as rtp_fd:
             packet_counter = 0
+            success_counter = 0
             packet = []
             for xline in rtp_fd:
                 if ' ' not in xline or not xline:
                     if packet:
                         packet_counter += 1
-                        self.record_rtp_packet(packet)
+                        if self.record_rtp_packet(packet):
+                            success_counter += 1
                         packet = []
                 else:
                     content = xline.split()
@@ -463,8 +475,9 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 
             if packet:
                 self.record_rtp_packet(packet,is_last=True)
+
+            print("Written %d out of %d packets" % (success_counter, packet_counter))
         self.end_file()
-        print("Written ", packet_counter, " packets")
 
 if __name__ == "__main__":
 
@@ -502,11 +515,24 @@ if __name__ == "__main__":
         , default=None
         , help='srtpkey to decrypt the rtp')
                    
+    parser.add_argument('--payloadtype'
+        , required=False
+        , type=int
+        , default=111
+        , help='Specify payload type as it appears in SDP. It is used to filter-out RTCP packets')
+                   
+    parser.add_argument('--ssrc'
+        , required=False
+        , type=int
+        , default=None
+        , help='Specify ssrc as it appears in SDP. It is used to filter-out specific stream')
+                   
+
     args = parser.parse_args()
     if args.v:
         print(args)
     if args.hexfile and args.outfile:
-        opusfile = srtp_ogg_opus_coder(rtp_header_len=args.rtplen,udp_header_len=args.udplen,verbose=args.v,srtpkey=args.srtpkey)
+        opusfile = srtp_ogg_opus_coder(rtp_header_len=args.rtplen,udp_header_len=args.udplen,verbose=args.v,srtpkey=args.srtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
         opusfile.record_rtp_file(args.hexfile, args.outfile)
     if args.explainfile:
         opusfile = ogg_opus_coder(verbose=args.v)

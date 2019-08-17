@@ -1,3 +1,4 @@
 
  - [ ] Explain `pcap` file into streams
- - [ ] Put the `ssrc` in the ogg comment header
+ - [x] Put the `ssrc` in the ogg comment header
+ - [ ] Record `pcap` file directly

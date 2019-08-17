@@ -24,8 +24,25 @@ Note the UDP header length is 20 for ipv4. And if the pcap contains ethernet lay
 For encrypted packets, we can specify the srtpkey.
 
 ```
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 64 --srtpkey somebase64key=
+hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 64 --srtpkey somebase64key
 ```
 
+It is also possible to filter using `ssrc` and payload type.
 
 
+```
+hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 64 --srtpkey somebase64key --ssrc 1234 --payloadtype 111
+```
+
+Requirements
+=============
+
+    - Python 3 (TODO make a python2.7 version)
+    - pylibsrtp (pip install pylibsrtp)
+
+Links
+========
+
+    - similar tools for amr [Codec payload Extractor](https://github.com/Spinlogic/AMR-WB_extractor)
+    - [srtp-decrypt](https://github.com/gteissier/srtp-decrypt)
+    - [opus-tools](https://opus-codec.org/downloads/)
