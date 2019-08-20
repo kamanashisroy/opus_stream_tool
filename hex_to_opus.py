@@ -413,7 +413,22 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
             print("Not an RTP")
             return False
 
-        # rtp_exten = rtp.FIRST & 0b1
+        rtp_exten = rtp.FIRST & 0b10000
+        rtp_exten_length = 0
+        rtp_csrc  = rtp.FIRST & 0b1111
+
+        # calculate rtp header length
+        calc_rtp_header_len = self.rtp_header_len + rtp_csrc*4
+        if rtp_exten:
+            exten_start = self.rtp_header_len+rtp_csrc*4
+            exten_raw = rtp_raw_full[exten_start:exten_start+4]
+            rtp_exten_profile,rtp_exten_length = struct.unpack('>HH', exten_raw)
+            calc_rtp_header_len += 4 + rtp_exten_length*4
+
+        if self.verbose:
+            print("rtp_header_len", calc_rtp_header_len)
+
+
         # Filter opus
         if self.payload_type and rtp.PAYLOAD_TYPE != self.payload_type:
             print("Skipping payload {rtp_payload_type} while {opus_payload_type} expected.".format(rtp_payload_type=rtp.PAYLOAD_TYPE, opus_payload_type=self.payload_type))
@@ -445,8 +460,9 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         if self.ogg.get_curr_bitstream() != rtp.SSRC:
             self.write_stream_header(rtp.SSRC)
             self.write_stream_comment('hex_to_opus', [str(rtp)])
-
-        rtp_payload = rtp_raw_full[self.rtp_header_len:]
+        
+        # rtp_payload = rtp_raw_full[self.rtp_header_len:]
+        rtp_payload = rtp_raw_full[calc_rtp_header_len:]
         self.ogg.write_page(rtp_payload, is_data=True,is_last=is_last, ptime=20, pageno=rtp.SEQUENCE_NUMBER) # By default the ptime=20
         return True
 
