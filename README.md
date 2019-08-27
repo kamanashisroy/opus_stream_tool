@@ -16,22 +16,22 @@ In case we have a `in.pcap` that contains the ethernet frames and UDP and RTP en
 
 ```
 tshark -x -r in.pcap -Y "rtp && udp.srcport == myport" | cut -d " " -f 1-20 > tmp.txt
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 20
+hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 20
 ```
 
-Note the UDP header length is 20 for ipv4. And if the pcap contains ethernet layer, then udplen(=42) should contain all the other layers as well. In case of IPv4 it becomes 64. udplen does not mean udpheder length, but the offset of rtp header.
+And if the pcap contains ethernet layer, then udpoffset(=42) should contain the length of those headers. 
 
 For encrypted packets, we can specify the srtpkey.
 
 ```
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 64 --srtpkey somebase64key
+hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 64 --srtpkey somebase64key
 ```
 
 It is also possible to filter using `ssrc` and payload type.
 
 
 ```
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udplen 64 --srtpkey somebase64key --ssrc 1234 --payloadtype 111
+hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 64 --srtpkey somebase64key --ssrc 1234 --payloadtype 111
 ```
 
 Requirements

@@ -23,7 +23,7 @@ import base64
 from pylibsrtp import Policy,Session
 from collections import namedtuple
 
-__all__ = ['ogg_opus_coder','srtp_ogg_opus_coder','ogg_page_coder']
+__all__ = ['ogg_opus_coder','srtp_ogg_opus_coder','ogg_page_coder','RTP_HEADER','RTP_HEADER_FMT','RTP_FIXED_HEADER']
 __author__ = "Kamanashis Roy"
 __copyright__ = "Copyright (C) 2019 Kamanashis Roy"
 __license__ = "GNU Public License version 3"
@@ -352,17 +352,18 @@ class ogg_opus_coder:
 
         print("Read %d pages" % page_counter)
 
+RTP_FIXED_HEADER = 12
 class srtp_ogg_opus_coder(ogg_opus_coder):
     '''
     Allow record srtp/rtp stream
     '''
-    def __init__(self,rtp_header_len=12, udp_header_len=0,srtpkey=None,verbose=False,payload_type=111,filter_ssrc=None):
+    def __init__(self,override_payload_offset=None, rtp_offset=0,srtpkey=None,verbose=False,payload_type=111,filter_ssrc=None):
         #super(ogg_opus_coder, self).__init__(verbose=verbose)
         ogg_opus_coder.__init__(self,verbose=verbose)
   
         # setup rtp parameters
-        self.rtp_header_len = rtp_header_len
-        self.udp_header_len = udp_header_len
+        self.override_payload_offset = override_payload_offset
+        self.rtp_offset = rtp_offset
         self.payload_type = payload_type
 
         # setup srtp parameters
@@ -384,23 +385,21 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 
         rtp_raw_full = None
         try:
-            rtp_raw_full = bytes.fromhex(''.join(packet[self.udp_header_len:]))
+            rtp_raw_full = bytes.fromhex(''.join(packet[self.rtp_offset:]))
         except:
             print("Failed to get hex", packet)
             return False
 
-        if len(rtp_raw_full) < self.rtp_header_len:
+        if len(rtp_raw_full) < RTP_FIXED_HEADER:
             print("udp payload is too small")
             return False
 
 
         if self.verbose:
-            print(self.udp_header_len, packet[self.udp_header_len-1])
-            print(self.rtp_header_len, packet[self.udp_header_len])
-            print(self.rtp_header_len, packet[self.udp_header_len+1])
+            print(self.rtp_offset, packet[self.rtp_offset-1], packet[self.rtp_offset], packet[self.rtp_offset+1])
 
         # decode RTP Header
-        rtp_raw_header = rtp_raw_full[:12]
+        rtp_raw_header = rtp_raw_full[:RTP_FIXED_HEADER]
 
         if self.verbose:
             print(rtp_raw_header.hex())
@@ -418,16 +417,21 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         rtp_csrc  = rtp.FIRST & 0b1111
 
         # calculate rtp header length
-        calc_rtp_header_len = self.rtp_header_len + rtp_csrc*4
+        calc_rtp_header_len = RTP_FIXED_HEADER + rtp_csrc*4
         if rtp_exten:
-            exten_start = self.rtp_header_len+rtp_csrc*4
+            exten_start = RTP_FIXED_HEADER+rtp_csrc*4
             exten_raw = rtp_raw_full[exten_start:exten_start+4]
+            if len(exten_raw) != 4:
+                print("Skipping malformed RTP")
+                return False
             rtp_exten_profile,rtp_exten_length = struct.unpack('>HH', exten_raw)
             calc_rtp_header_len += 4 + rtp_exten_length*4
 
         if self.verbose:
-            print("rtp_header_len", calc_rtp_header_len)
+            print("calc_rtp_header_len", calc_rtp_header_len)
 
+        if self.override_payload_offset:
+            calc_rtp_header_len = self.override_payload_offset - self.rtp_offset
 
         # Filter opus
         if self.payload_type and rtp.PAYLOAD_TYPE != self.payload_type:
@@ -461,7 +465,7 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
             self.write_stream_header(rtp.SSRC)
             self.write_stream_comment('hex_to_opus', [str(rtp)])
         
-        # rtp_payload = rtp_raw_full[self.rtp_header_len:]
+        # rtp_payload = rtp_raw_full[RTP_FIXED_HEADER:]
         rtp_payload = rtp_raw_full[calc_rtp_header_len:]
         self.ogg.write_page(rtp_payload, is_data=True,is_last=is_last, ptime=20, pageno=rtp.SEQUENCE_NUMBER) # By default the ptime=20
         return True
@@ -513,16 +517,16 @@ if __name__ == "__main__":
     parser.add_argument('--explainfile'
         , required=False
         , help='ogg formatted opus input file')
-    parser.add_argument('--rtplen'
+    parser.add_argument('--payloadoffset'
         , required=False
         , type=int
-        , default=12
-        , help='Length of rtp header, should be 12, see also --udplen')
-    parser.add_argument('--udplen'
+        , default=None
+        , help='Forced payload offset, should be 12+rtpoffset when no extension. Currently extension is calculated automatically in case the offset not forced., see also --rtpoffset')
+    parser.add_argument('--rtpoffset'
         , required=False
         , type=int
         , default=0
-        , help='Length of udp header, should be 8 for IPV4')
+        , help='Offset of rtp header')
                    
 
     # Support decryption
@@ -548,7 +552,7 @@ if __name__ == "__main__":
     if args.v:
         print(args)
     if args.hexfile and args.outfile:
-        opusfile = srtp_ogg_opus_coder(rtp_header_len=args.rtplen,udp_header_len=args.udplen,verbose=args.v,srtpkey=args.srtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
+        opusfile = srtp_ogg_opus_coder(override_payload_offset=args.payloadoffset,rtp_offset=args.rtpoffset,verbose=args.v,srtpkey=args.srtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
         opusfile.record_rtp_file(args.hexfile, args.outfile)
     if args.explainfile:
         opusfile = ogg_opus_coder(verbose=args.v)
