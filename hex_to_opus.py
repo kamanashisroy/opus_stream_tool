@@ -20,6 +20,7 @@ import struct
 import sys
 import math
 import base64
+import re
 from pylibsrtp import Policy,Session
 from collections import namedtuple
 
@@ -57,6 +58,8 @@ class ogg_page_coder:
 
     def reset(self, strm_fd = None):
         if self.strm_fd:
+            if self.verbose:
+                print("Written %d pages in opus file" % self.page_seq)
             self.strm_fd.close()
         self.page_seq = 0
         self.strm_fd = strm_fd
@@ -442,6 +445,10 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
             print("Skipping ssrc={rtp_ssrc} while {filter_ssrc} expected".format(rtp_ssrc=rtp.SSRC,filter_ssrc=self.filter_ssrc))
             return False
 
+        if len(rtp_raw_full) < (calc_rtp_header_len+1):
+            print("Empty payload")
+            return False
+
         if self.srtpkey:
             if self.ssrc != rtp.SSRC:
                 print("using key [%s]" % self.srtpkey)
@@ -476,12 +483,13 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         Convert an RTP hexdump into a recorded file
         '''
         self.start_file(outfile)
+        re_valid_hex = re.compile(r'^[0-9A-Fa-f]{6} [0-9A-Fa-f]{2}')
         with open(infile, 'r') as rtp_fd:
             packet_counter = 0
             success_counter = 0
             packet = []
             for xline in rtp_fd:
-                if ' ' not in xline or not xline:
+                if not xline or not re_valid_hex.match(xline):
                     if packet:
                         packet_counter += 1
                         if self.record_rtp_packet(packet):
@@ -502,10 +510,8 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='record opus rtp')
-    parser.add_argument('--timestamp'
-        , action='store_true'
-        , help='Indicate if the timestamp is specified, TODO remove it')
     parser.add_argument('-v'
+        , required=False
         , action='store_true'
         , help='Show verbose output')
     parser.add_argument('--hexfile'
