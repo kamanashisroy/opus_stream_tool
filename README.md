@@ -1,5 +1,5 @@
 
-This tool allows to get ogg formatted opus file for given RTP.
+This tool allows to record ogg formatted opus file for given RTP pcap.
 
 Examples
 ========
@@ -16,22 +16,22 @@ In case we have a `in.pcap` that contains the ethernet frames and UDP and RTP en
 
 ```
 tshark -x -r in.pcap -Y "rtp && udp.srcport == myport" | cut -d " " -f 1-20 > tmp.txt
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 20
+hex_to_opus.py -x tmp.txt --recordfile out.opus --rtpoffset 42
 ```
 
-And if the pcap contains ethernet layer, then udpoffset(=42) should contain the length of those headers. 
+And if the pcap contains ethernet layer and UDP header, then rtpoffset(=42) should contain the length of those headers. 
 
 For encrypted packets, we can specify the srtpkey.
 
 ```
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 64 --srtpkey somebase64key
+hex_to_opus.py -x tmp.txt --recordfile out.opus --rtpoffset 42 --srtpkey somebase64key
 ```
 
 It is also possible to filter using `ssrc` and payload type.
 
 
 ```
-hex_to_opus.py --hexfile tmp.txt --outfile out.opus --udpoffset 64 --srtpkey somebase64key --ssrc 1234 --payloadtype 111
+hex_to_opus.py -x tmp.txt --recordfile out.opus --rtpoffset 42 --srtpkey somebase64key --ssrc 1234 --payloadtype 111
 ```
 
 Requirements
@@ -44,5 +44,6 @@ Links
 ========
 
     - similar tools for amr [Codec payload Extractor](https://github.com/Spinlogic/AMR-WB_extractor)
+    - [pylibsrtp](https://pylibsrtp.readthedocs.io/en/latest/)
     - [srtp-decrypt](https://github.com/gteissier/srtp-decrypt)
     - [opus-tools](https://opus-codec.org/downloads/)

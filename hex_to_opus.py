@@ -245,6 +245,7 @@ OPUS_IDENTITY_HEADER_FMT = '<8sBBHIhB'
 
 RTP_HEADER = namedtuple('RTP_HEADER', 'FIRST,PAYLOAD_TYPE,SEQUENCE_NUMBER,TIMESTAMP,SSRC')
 RTP_HEADER_FMT = '>BBHII'
+MAX_RTP_SEQUENCE_NUM = 65535
 
 class ogg_opus_coder:
     '''
@@ -360,7 +361,7 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
     '''
     Allow record srtp/rtp stream
     '''
-    def __init__(self,override_payload_offset=None, rtp_offset=0,srtpkey=None,verbose=False,payload_type=111,filter_ssrc=None):
+    def __init__(self,override_payload_offset=None, rtp_offset=0,srtpkey=None,resrtpkey=None,verbose=False,payload_type=111,filter_ssrc=None):
         #super(ogg_opus_coder, self).__init__(verbose=verbose)
         ogg_opus_coder.__init__(self,verbose=verbose)
   
@@ -371,6 +372,7 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 
         # setup srtp parameters
         self.srtpkey = srtpkey
+        self.resrtpkey = resrtpkey
         self.srtp_session = None
         self.ssrc = None
         self.filter_ssrc = filter_ssrc
@@ -451,19 +453,25 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
 
         if self.srtpkey:
             if self.ssrc != rtp.SSRC:
+                if not self.srtp_session:
+                    self.srtp_session = Session()
                 print("using key [%s]" % self.srtpkey)
-                #plc = Policy(key=self.srtpkey.encode("utf-8"),ssrc_type=Policy.SSRC_ANY_INBOUND)
                 srtpkey = base64.b64decode(self.srtpkey)
                 plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_INBOUND)
-                #plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_INBOUND, SSRC_SPECIFIC=1)
-                #plc = Policy(key=srtpkey,ssrc_type=Policy.SSRC_ANY_INBOUND)
                 print(plc)
-                self.srtp_session = Session(policy=plc)
+                self.srtp_session.add_stream(plc)
                 self.ssrc = rtp.SSRC
             try:
                 rtp_raw_full = self.srtp_session.unprotect(rtp_raw_full)
             except:
                 print("decrypt fail seq={sequence}, ssrc={ssrc}".format(sequence=rtp.SEQUENCE_NUMBER,ssrc=rtp.SSRC))
+                '''
+                if self.resrtpkey:
+                    srtpkey = base64.b64decode(self.resrtpkey)
+                    plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_INBOUND)
+                    self.srtp_session.add_stream(plc)
+                    print("Using restrpkey here from next packet")
+                '''
                 return False
 
 
@@ -507,39 +515,139 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
             print("Written %d out of %d packets" % (success_counter, packet_counter))
         self.end_file()
 
+    def hexdump(self, content):
+        counter = 0
+        output = []
+        for segment in range((len(content)>>4)+1):
+            segment_out = []
+
+            segment_out.append('%06x' % counter)
+            for offset in range(0,16):
+                pos = (segment<<4)+offset
+                if pos >= len(content):
+                    break # avoid overflow
+                segment_out.append('%02x' % content[pos])
+                counter += 1
+            output.append(' '.join(segment_out))
+
+        output.append('\n')
+        return '\n'.join(output)
+
+    def playback_as_srtp_stream(self, infile, outfile, starting_sequence = 0):
+        '''
+        Read an ogg file and create rtp/srtp in hex form
+        '''
+        self.ogg.reset(open(infile, 'rb'))
+
+        with open(outfile, 'w') as hex_fd:
+            page_counter = 0
+            sequence_counter = starting_sequence
+            for header,content in self.ogg:
+                print(header)
+                if 0 == page_counter:
+                    opus_identity_head = OPUS_IDENTITY_HEADER._make(struct.unpack(OPUS_IDENTITY_HEADER_FMT, content))
+                    print(opus_identity_head)
+                #elif 1 == page_counter:
+                #    opus_comment_head = OPUS_COMMENT_HEADER._make(struct.unpack(OPUS_COMMENT_HEADER_FMT, content))
+                #    print(opus_comment_head)
+                else:
+                    print(' '.join([hex(x) for x in content]))
+                    if page_counter > 1:
+                        # show the TOC byte
+                        #toc = content[0]
+                        #config = (toc >> 3)
+                        #s = toc & 0b100
+                        #s = s >> 2
+                        #num_frames = toc & 0b11
+                        #print("config %d, s %d, c/frames %d" % (config, s, num_frames))
+
+                        # make an RTP packet
+                        rtp = RTP_HEADER(0x80, self.payload_type, sequence_counter, header.GRANULE_POS, header.BITSTREAM)
+                        rtp_raw_full = struct.pack(RTP_HEADER_FMT, *rtp) + content
+
+                        if self.srtpkey:
+                            if self.ssrc != rtp.SSRC:
+                                print("using key [%s]" % self.srtpkey)
+                                srtpkey = base64.b64decode(self.srtpkey)
+                                plc = Policy(key=srtpkey,ssrc_value=rtp.SSRC,ssrc_type=Policy.SSRC_ANY_OUTBOUND)
+                                print(plc)
+                                self.srtp_session = Session(policy=plc)
+                                self.ssrc = rtp.SSRC
+                            try:
+                                rtp_raw_full = self.srtp_session.protect(rtp_raw_full)
+                            except:
+                                print("encrypt fail seq={sequence}, ssrc={ssrc}".format(sequence=rtp.SEQUENCE_NUMBER,ssrc=rtp.SSRC))
+                        
+                        hex_fd.write(self.hexdump(rtp_raw_full))
+                        if sequence_counter == MAX_RTP_SEQUENCE_NUM:
+                            sequence_counter = 0
+                        else:
+                            sequence_counter += 1
+
+                page_counter += 1
+                print("Read %d pages" % page_counter)
+
+
+
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description='record opus rtp')
-    parser.add_argument('-v'
+    parser = argparse.ArgumentParser(description='RTP hex-dump reader/writer tool for OPUS payload')
+    parser.add_argument('-v', '--verbose'
         , required=False
         , action='store_true'
         , help='Show verbose output')
-    parser.add_argument('--hexfile'
-        , required=False
-        , help='Text output of pcap, hint `tshark -x -r file.pcap -Y "rtp && udp.srcport == myport" | cut -d " " -f 1-20 > strm_from_myport.txt` ')
-    parser.add_argument('--outfile'
-        , required=False
-        , help='ogg formatted opus output file')
-    parser.add_argument('--explainfile'
+
+    explain_group = parser.add_argument_group('Explain opus file')
+    explain_group.add_argument('--explainfile'
         , required=False
         , help='ogg formatted opus input file')
-    parser.add_argument('--payloadoffset'
+
+    record_group = parser.add_argument_group('Record rtp/srtp stream')
+    record_group.add_argument('-r', '--recordfile'
+        , required=False
+        , help='ogg formatted opus output file')
+
+    record_group.add_argument('--payloadoffset'
         , required=False
         , type=int
         , default=None
         , help='Forced payload offset, should be 12+rtpoffset when no extension. Currently extension is calculated automatically in case the offset not forced., see also --rtpoffset')
-    parser.add_argument('--rtpoffset'
+
+    record_group.add_argument('--rtpoffset'
         , required=False
         , type=int
         , default=0
         , help='Offset of rtp header')
-                   
 
-    # Support decryption
-    parser.add_argument('--srtpkey'
+    record_group.add_argument('--ssrc'
+        , required=False
+        , type=int
+        , default=None
+        , help='Specify ssrc as it appears in SDP. It is used to filter-out specific stream')
+ 
+                   
+    playfile_group = parser.add_argument_group('Playback opus file into hex-stream')
+    playfile_group.add_argument('--playfile'
+        , required=False
+        , help='ogg formatted opus input file that is streamed into rtp hex file')
+
+    playfile_group.add_argument('--streamseq'
+        , required=False
+        , type=int
+        , default=0
+        , help='Specify starting sequence while creating playback rtp stream')
+ 
+    # Support encryption/decryption
+    parser.add_argument('-k', '--srtpkey'
         , required=False
         , default=None
-        , help='srtpkey to decrypt the rtp')
+        , help='srtpkey to encrypt/decrypt the rtp')
+
+    parser.add_argument('--resrtpkey'
+        , required=False
+        , default=None
+        , help='srtp re-key/second-key to decrypt the rtp\n'
+            'It is used when the srtpkey fails to decrypt valid rtp-payload.')
                    
     parser.add_argument('--payloadtype'
         , required=False
@@ -547,20 +655,26 @@ if __name__ == "__main__":
         , default=111
         , help='Specify payload type as it appears in SDP. It is used to filter-out RTCP packets')
                    
-    parser.add_argument('--ssrc'
+
+    parser.add_argument('-x', '--hexfile'
         , required=False
-        , type=int
-        , default=None
-        , help='Specify ssrc as it appears in SDP. It is used to filter-out specific stream')
-                   
+        , help='Text output of pcap, hint `tshark -x -r file.pcap -Y "rtp && udp.srcport == myport" | cut -d " " -f 1-20 > strm_from_myport.txt`\n'
+            'In case of recording, it is input file. In case of playback, it is the output file')
+
+
 
     args = parser.parse_args()
-    if args.v:
+    if args.verbose:
         print(args)
-    if args.hexfile and args.outfile:
-        opusfile = srtp_ogg_opus_coder(override_payload_offset=args.payloadoffset,rtp_offset=args.rtpoffset,verbose=args.v,srtpkey=args.srtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
-        opusfile.record_rtp_file(args.hexfile, args.outfile)
+    if args.hexfile and args.recordfile:
+        opusfile = srtp_ogg_opus_coder(override_payload_offset=args.payloadoffset,rtp_offset=args.rtpoffset,verbose=args.verbose,srtpkey=args.srtpkey,resrtpkey=args.resrtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
+        opusfile.record_rtp_file(args.hexfile, args.recordfile)
     if args.explainfile:
-        opusfile = ogg_opus_coder(verbose=args.v)
+        opusfile = ogg_opus_coder(verbose=args.verbose)
         opusfile.explain_file(args.explainfile)
+
+    if args.playfile:
+        opusfile = srtp_ogg_opus_coder(override_payload_offset=args.payloadoffset,rtp_offset=args.rtpoffset,verbose=args.verbose,srtpkey=args.srtpkey,payload_type=args.payloadtype,filter_ssrc=args.ssrc)
+        opusfile.playback_as_srtp_stream(args.playfile, args.hexfile, args.streamseq)
+
 
