@@ -491,7 +491,7 @@ class srtp_ogg_opus_coder(ogg_opus_coder):
         Convert an RTP hexdump into a recorded file
         '''
         self.start_file(outfile)
-        re_valid_hex = re.compile(r'^[0-9A-Fa-f]{6} [0-9A-Fa-f]{2}')
+        re_valid_hex = re.compile(r'^[0-9A-Fa-f]{1,8}\s{1,4}[0-9A-Fa-f]{2}')
         with open(infile, 'r') as rtp_fd:
             packet_counter = 0
             success_counter = 0

@@ -15,7 +15,7 @@ TODO
 In case we have a `in.pcap` that contains the ethernet frames and UDP and RTP encapsulation, we can record audio like the following.
 
 ```
-tshark -x -r in.pcap -Y "rtp && udp.srcport == myport" | cut -d " " -f 1-20 > tmp.txt
+tshark -x -r in.pcap -Y "udp.srcport == myport" | cut -d " " -f 1-20 > tmp.txt
 hex_to_opus.py -x tmp.txt --recordfile out.opus --rtpoffset 42
 ```
 
@@ -43,7 +43,7 @@ Requirements
 Links
 ========
 
-    - similar tools for amr [Codec payload Extractor](https://github.com/Spinlogic/AMR-WB_extractor)
-    - [pylibsrtp](https://pylibsrtp.readthedocs.io/en/latest/)
-    - [srtp-decrypt](https://github.com/gteissier/srtp-decrypt)
-    - [opus-tools](https://opus-codec.org/downloads/)
+[Codec payload Extractor]:https://github.com/Spinlogic/AMR-WB_extractor
+[pylibsrtp]:https://pylibsrtp.readthedocs.io/en/latest/
+[srtp-decrypt]:https://github.com/gteissier/srtp-decrypt
+[opus-tools]:https://opus-codec.org/downloads/
